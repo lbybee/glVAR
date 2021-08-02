@@ -1,4 +1,5 @@
 from scipy.linalg.lapack import dsysv
+from joblib import Parallel, delayed
 from datetime import datetime
 from proxcd import glasso
 #from testimp import glasso
@@ -7,9 +8,9 @@ import pandas as pd
 import numpy as np
 
 
-def glVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
-          regconst_min=0., stp_dec=False,
-          gliter=100, gltol=1e-4):
+def pglVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
+           regconst_min=0., stp_dec=False,
+           gliter=100, gltol=1e-4, n_jobs=12):
     """fit VAR with group-lasso over vars and lags
 
     Parameters
@@ -86,18 +87,28 @@ def glVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
     else:
         regconst_path = ind
 
+    # build coefs in parallel
     B_l = []
     B_l.append(Bunreg)
-    for regconst in regconst_path[1:]:
-
-        # form reg-const array and gradient
-        regconst_arr = np.array(np.ones(P) * regconst, order="F")
-        grad = np.array((YXYX.dot(Bunreg) - YXYc) / T, order="F")
-        # fit glasso
-        B = glasso(Bunreg, YXYX / T, grad, stp_size, regconst_arr, N, M, L,
-                   gliter, gltol)
-        B = np.array(B, order="F")
-        B_l.append(B)
+    B_l.extend(Parallel(n_jobs=n_jobs)(
+                    delayed(pfit)(regconst, Bunreg, YXYX, YXYc, stp_size,
+                                  T, P, N, M, L, gliter, gltol)
+                    for regconst in regconst_path))
 
     var_l = list(YX_df.columns)
     return np.array(B_l), regconst_path, var_l
+
+
+def pfit(regconst, Bunreg, YXYX, YXYc, stp_size, T, P, N, M, L,
+         gliter, gltol):
+    """fit glasso for particular fit"""
+
+    # form reg-const array and gradient
+    regconst_arr = np.array(np.ones(P) * regconst, order="F")
+    grad = np.array((YXYX.dot(Bunreg) - YXYc) / T, order="F")
+    # fit glasso
+    B = glasso(Bunreg, YXYX / T, grad, stp_size, regconst_arr, N, M, L,
+               gliter, gltol)
+    B = np.array(B, order="F")
+
+    return B

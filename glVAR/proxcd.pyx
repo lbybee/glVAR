@@ -247,11 +247,12 @@ def glasso(double[::1,:] B, double[::1,:] YXYX, double[::1,:] grad,
             score = glasso_iter(B, YXYX, stp_size, grad, prox,
                                 regconst, N, M, L, NL, NML)
 
+            printf("iter: %d score: %f\n", i, score)
+
             # return based on score
             if score < gltol:
                 break
 
-            printf("iter: %d score: %f\n", i, score)
 
     if gliter == (i + 1):
         print("Didn't converge")
