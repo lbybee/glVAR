@@ -1,15 +1,16 @@
 from scipy.linalg.lapack import dsysv
+from joblib import Parallel, delayed
 from datetime import datetime
-from proxcd import glasso
+from proxcd_ndiag import glasso
 #from testimp import glasso
 import scipy.linalg as sla
 import pandas as pd
 import numpy as np
 
 
-def glVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
-          regconst_min=0., regconst_arr=None, stp_dec=False,
-          gliter=100, gltol=1e-4, endog_pen=True):
+def pglVAR_ndiag(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
+                 regconst_min=0., regconst_arr=None, stp_dec=False,
+                 gliter=100, gltol=1e-4, n_jobs=12, endog_pen=True):
     """fit VAR with group-lasso over vars and lags
 
     Parameters
@@ -68,7 +69,7 @@ def glVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
     # form YY, XX, vYvY, XvY
     YXYX = np.array(YX.T.dot(YX), order="F")
     YXYc = np.array(YX.T.dot(Yc), order="F")
-    stp_size = np.linalg.eigvalsh(YXYX)[-1] / T * (1 + 10e-6)
+    stp_size = np.linalg.eigvalsh(YXYX)[-1] / (T * N * L)
 
     # handle endog penalty
     if regconst_arr is None and endog_pen is False:
@@ -90,24 +91,36 @@ def glVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
     else:
         regconst_path = ind
 
+    B = np.random.normal(size=((N + M) * L, N))
+
+    # build coefs in parallel
     B_l = []
     B_l.append(Bunreg)
-    for regconst in regconst_path[1:]:
-
-        # form reg-const array
-        if regconst_arr is None:
-            regconst_arr = np.array(np.ones(N + M) * regconst, order="F")
-        else:
-            regconst_arr = np.array(regconst_arr * regconst, order="F")
-
-        # form gradient
-        grad = np.array((YXYX.dot(Bunreg) - YXYc) / T, order="F")
-
-        # fit glasso
-        B = glasso(Bunreg, YXYX / T, grad, stp_size, regconst_arr, N, M, L,
-                   gliter, gltol)
-        B = np.array(B, order="F")
-        B_l.append(B)
+    B_l.extend(Parallel(n_jobs=n_jobs)(
+                    delayed(pfit)(regconst, Bunreg, YXYX, YXYc, stp_size,
+                                  T, P, N, M, L, regconst_arr, gliter, gltol)
+                    for regconst in regconst_path))
 
     var_l = list(YX_df.columns)
     return np.array(B_l), regconst_path, var_l
+
+
+def pfit(regconst, Bunreg, YXYX, YXYc, stp_size, T, P, N, M, L,
+         regconst_arr, gliter, gltol):
+    """fit glasso for particular fit"""
+
+    # form reg-const array
+    if regconst_arr is None:
+        regconst_arr = np.array(np.ones(N + M) * regconst, order="F")
+    else:
+        regconst_arr = np.array(regconst_arr * regconst, order="F")
+
+    # form gradient
+    grad = np.array((YXYX.dot(Bunreg) - YXYc) / T, order="F")
+
+    # fit glasso
+    B = glasso(Bunreg, YXYX / T, grad, stp_size, regconst_arr, N, M, L,
+               gliter, gltol)
+    B = np.array(B, order="F")
+
+    return B

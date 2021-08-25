@@ -1,16 +1,18 @@
 from scipy.linalg.lapack import dsysv
 from joblib import Parallel, delayed
 from datetime import datetime
-from proxcd import glasso
+from proxcd_ARres import glasso
 #from testimp import glasso
+import statsmodels.api as sm
 import scipy.linalg as sla
 import pandas as pd
 import numpy as np
 
 
-def pglVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
-           regconst_min=0., regconst_arr=None, stp_dec=False,
-           gliter=100, gltol=1e-4, n_jobs=12, endog_pen=True):
+def pglVAR_ARres(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
+                 regconst_min=0., regconst_arr=None, stp_dec=False,
+                 gliter=100, gltol=1e-4, n_jobs=12, endog_pen=True,
+                 ar_order="first"):
     """fit VAR with group-lasso over vars and lags
 
     Parameters
@@ -38,6 +40,25 @@ def pglVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
         M = 0
     P = (N + M) * L
 
+    # if we calc the AR resids first do that here
+    if ar_order == "first":
+        for c in endog:
+            exogt_l = []
+            for l in range(1, L + 1):
+                val = endog[c].shift(l)
+                val.name = "%s_L%d" % (c, l)
+                exogt_l.append(val)
+            exogt = pd.concat(exogt_l, axis=1).dropna()
+            endogc = endog[c]
+            endogc = endogc[endogc.index.isin(exogt.index)]
+            exogt = exogt[exogt.index.isin(endogc.index)]
+            mod = sm.OLS(endogc, sm.add_constant(exogt))
+            fit = mod.fit()
+            endog[c] = fit.resid
+        endog = endog.dropna()
+    elif ar_order != "last":
+        raise ValueError("Unknown ar_order: %s" % ar_order)
+
     # form lag
     cols = list(endog.columns)
     data_l = []
@@ -54,12 +75,33 @@ def pglVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
                 df.name = "%s_l%d" % (c, l)
                 data_l.append(df)
     YX_df = pd.concat(data_l, axis=1).iloc[L:,:]
+
+    # if we calc AR resids after forming exog do that here
+    if ar_order == "last":
+        for c in endog:
+            exogt_l = []
+            for l in range(1, L + 1):
+                val = endog[c].shift(l)
+                val.name = "%s_L%d" % (c, l)
+                exogt_l.append(val)
+            exogt = pd.concat(exogt_l, axis=1).dropna()
+            endogc = endog[c]
+            endogc = endogc[endogc.index.isin(exogt.index)]
+            exogt = exogt[exogt.index.isin(endogc.index)]
+            mod = sm.OLS(endogc, sm.add_constant(exogt))
+            fit = mod.fit()
+            endog[c] = fit.resid
+        endog = endog.dropna()
+    elif ar_order != "first":
+        raise ValueError("Unknown ar_order: %s" % ar_order)
     endog = endog.iloc[L:,:]
 
     # form starting values for B
     B = np.zeros(shape=((N + M) * L, N))
     for i, c in enumerate(endog.columns):
         B[:,i] = sla.lstsq(YX_df.values, endog[c].values)[0]
+        # zero out entries corresponding to pre-fit endog cols
+        B[(i*L):((i+1)*L),i] = 0
     Bunreg = np.array(B, order="F")
 
     # form values and vectorized endog
@@ -68,7 +110,11 @@ def pglVAR(endog, exog=None, L=1, regconst_max=1., regconst_stps=101,
 
     # form YY, XX, vYvY, XvY
     YXYX = np.array(YX.T.dot(YX), order="F")
-    YXYc = np.array(YX.T.dot(Yc), order="F")
+    # zero out rows corresponding to pre-fit endog cols
+    YXYc = YX.T.dot(Yc)
+    for i, c in enumerate(endog.columns):
+        YXYc[(i*L):((i+1)*L),i] = 0
+    YXYc = np.array(YXYc, order="F")
     stp_size = np.linalg.eigvalsh(YXYX)[-1] / (T * N * L) * (1 + 1e-6)
 
     # handle endog penalty

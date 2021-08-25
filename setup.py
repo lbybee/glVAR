@@ -6,6 +6,15 @@ import numpy as np
 ext_modules=[Extension("proxcd",
                        sources=["glVAR/proxcd.pyx"],
                        include_dirs=[np.get_include()]),
+             Extension("proxcd_exog",
+                       sources=["glVAR/proxcd_exog.pyx"],
+                       include_dirs=[np.get_include()]),
+             Extension("proxcd_ndiag",
+                       sources=["glVAR/proxcd_ndiag.pyx"],
+                       include_dirs=[np.get_include()]),
+             Extension("proxcd_ARres",
+                       sources=["glVAR/proxcd_ARres.pyx"],
+                       include_dirs=[np.get_include()]),
             ]
 
 setup(name='glVAR',

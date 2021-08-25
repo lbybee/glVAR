@@ -90,7 +90,7 @@ cdef double glasso_iter(double[::1,:] B, double[::1,:] YXYX,
         double score_den = 0
 
     # iterate over exog vars
-    for ni in range(N):
+    for ni in range(M):
 
         gprox = 0
 
@@ -148,62 +148,6 @@ cdef double glasso_iter(double[::1,:] B, double[::1,:] YXYX,
 #                                           YXYX[nq*L+l,ni*L+lj] *
 #                                           B[ni*L+lj,nj])
 
-    # iterate over endog vars
-    for m in range(M):
-
-        gprox = 0
-
-        # iterate over factors
-        for l in range(L):
-            for nj in range(N):
-
-                # add the NEGATIVE gradient - (YXYX B - YXYc)
-                prox[l*N+nj] = (B[N*L+m*L+l,nj] * stp_size -
-                                grad[N*L+m*L+l,nj])
-                gprox += prox[l*N+nj] ** 2
-
-        # generate slice fitted values
-        for nj in range(N):
-            _dgemv("n", NML, L, -1., &YXYX[0, N*L+m*L], NML,
-                   &B[N*L+m*L,nj], 1, 1., &grad[0,nj], 1)
-#        _dgemm("n", "n", NML, N, L, -1., &YXYX[0, N*L+m*L], NML,
-#               &B[N*L+m*L,0], L, 1., &grad[0,0], NML)
-#        for lj in range(L):
-#            for nq in range(N + M):
-#                for l in range(L):
-#                    for nj in range(N):
-#                        grad[nq*L+l,nj] = (grad[nq*L+l,nj] -
-#                                           YXYX[nq*L+l,N*L+m*L+lj] *
-#                                           B[N*L+m*L+lj,nj])
-
-        # build group penalty
-        gprox = (1. - (regconst[N+m] / sqrt(gprox)))
-        gprox = max(0, gprox)
-
-        for l in range(L):
-            for nj in range(N):
-
-                B_nml = B[N*L+m*L+l,nj]
-                B[N*L+m*L+l,nj] = prox[l*N+nj] * gprox / stp_size
-
-                # update score
-                score_num += (B[N*L+m*L+l,nj] - B_nml) ** 2
-                score_den += B_nml ** 2
-
-        # generate slice fitted values
-        for nj in range(N):
-            _dgemv("n", NML, L, 1., &YXYX[0, N*L+m*L], NML,
-                   &B[N*L+m*L,nj], 1, 1., &grad[0,nj], 1)
-#        _dgemm("n", "n", NML, N, L, 1., &YXYX[0, N*L+m*L], NML,
-#               &B[N*L+m*L,0], L, 1., &grad[0,0], NML)
-#        for lj in range(L):
-#            for nq in range(N + M):
-#                for l in range(L):
-#                    for nj in range(N):
-#                        grad[nq*L+l,nj] = (grad[nq*L+l,nj] +
-#                                           YXYX[nq*L+l,N*L+m*L+lj] *
-#                                           B[N*L+m*L+lj,nj])
-
     return score_num / score_den
 
 
@@ -230,7 +174,7 @@ def glasso(double[::1,:] B, double[::1,:] YXYX, double[::1,:] grad,
     cdef:
         int i = 0
         int NL = N * L
-        int NML = (N + M) * L
+        int NML = M * L
 
     cdef cnp.npy_intp pshape[2]
     pshape[0] = <cnp.npy_intp> NL
