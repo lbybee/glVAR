@@ -2,7 +2,7 @@ from sklearn.base import BaseEstimator
 from scipy.linalg.lapack import dsysv
 from joblib import Parallel, delayed
 from statsmodels.tsa.api import VAR
-from proxcdVAR import glassoVAR
+from proxcdVAR_egrad import glassoVAReg
 from datetime import datetime
 import matplotlib.pyplot as plt
 import scipy.linalg as sla
@@ -11,7 +11,7 @@ import numpy as np
 
 
 
-class glVAR(BaseEstimator):
+class glVAReg(BaseEstimator):
     """
     The core methods to implement a VAR with a group-lasso penalty
 
@@ -88,8 +88,13 @@ class glVAR(BaseEstimator):
 
         # form YY, XX, vYvY, XvY
         YXYX = np.array(YX.T.dot(YX), order="F")
+        diag = np.diag(YXYX)
+        ndiag = YXYX - diag * np.eye(YXYX.shape[0])
+        ndiag = np.sum(np.abs(ndiag), axis=1)
+        ind = np.abs(diag) > ndiag
+        print(ind, np.sum(ind), np.sum(ind != 1))
         YXYc = np.array(YX.T.dot(Yc), order="F")
-        stp_size = np.linalg.eigvalsh(YXYX)[-1] / T * (1 + 1e-6)
+        stp_size = np.linalg.eigvalsh(YXYX)[-1] / (T * N * lags) * (1 + 1e-6)
 
         # store kept values
         self.endog = endog
@@ -129,8 +134,6 @@ class glVAR(BaseEstimator):
         YXYX = self.YXYX
         YXYc = self.YXYc
         stp_size = self.stp_size
-        endog = self.endog
-        YX_df = self.YX_df
 
         # handle endog penalty
         if regconst_arr is None and endog_pen is False:
@@ -138,9 +141,6 @@ class glVAR(BaseEstimator):
 
         # initialize B starting value
         B = np.zeros(shape=((N + M) * lags, N), order="F")
-        for i, c in enumerate(endog.columns):
-            coef = sla.lstsq(YX_df.values, endog[c].values)[0]
-            B[:,i] = coef
 
         # fit glasso
         B = _fitgl(regconst, B, YXYX, YXYc, stp_size, T, P, N, M, lags,
@@ -171,8 +171,6 @@ class glVAR(BaseEstimator):
         YXYX = self.YXYX
         YXYc = self.YXYc
         stp_size = self.stp_size
-        endog = self.endog
-        YX_df = self.YX_df
 
         # handle endog penalty
         if regconst_arr is None and endog_pen is False:
@@ -196,9 +194,6 @@ class glVAR(BaseEstimator):
 
         # initialize B starting value
         B = np.zeros(shape=((N + M) * lags, N), order="F")
-        for i, c in enumerate(endog.columns):
-            coef = sla.lstsq(YX_df.values, endog[c].values)[0]
-            B[:,i] = coef
 
         # build coefs in parallel
         B = Parallel(n_jobs=n_jobs)(
@@ -346,7 +341,7 @@ class glVAR(BaseEstimator):
         # initialize B starting value
         B = np.zeros(shape=((N + M) * lags, N), order="F")
         for i, c in enumerate(endog.columns):
-            coef = sla.lstsq(YX_df.values, endog[c].values)[0]
+            coef = sm.OLS(endog[c], YX_df).fit().params.values
             B[:,i] = coef
 
         # fit glasso
@@ -426,8 +421,8 @@ def _fitgl(regconst, Binit, YXYX, YXYc, stp_size, T, P, N, M, lags,
     grad = np.array((YXYX.dot(Binit) - YXYc) / T, order="F")
 
     # fit glasso
-    B = glassoVAR(Binit, YXYX / T, grad, stp_size, regconst_arr,
-                  N, M, lags, **glkwds)
+    B = glassoVAReg(Binit, Binit, YXYX / T, grad, stp_size, regconst_arr,
+                    N, M, lags, **glkwds)
     B = np.array(B, order="F")
 
     return B

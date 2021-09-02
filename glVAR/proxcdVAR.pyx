@@ -4,6 +4,7 @@ from numpy import square, cov
 from numpy import (identity, dot, kron, pi, sum, zeros_like, ones,
                    asfortranarray)
 from numpy.linalg import pinv, norm, svd
+from libc.math cimport fabs
 cimport cython
 cimport numpy as cnp
 from libc.math cimport sin, cos, acos, exp, sqrt
@@ -84,18 +85,21 @@ cdef double glasso_iter(double[::1,:] B, double[::1,:] YXYX,
         int m = 0
         int l = 0
         int lj = 0
+        int nml = 0
         double B_nml
+        double B_norm = 0
+        double B_dnorm = 0
         double gprox
-        double score_num = 0
-        double score_den = 0
 
-    # iterate over exog vars
+    # iterate over endog vars (LHS)
     for ni in range(N):
 
         gprox = 0
 
         # iterate over lags
         for l in range(L):
+
+
             # TODO replace with lapack routine
             for nj in range(N):
 
@@ -104,51 +108,42 @@ cdef double glasso_iter(double[::1,:] B, double[::1,:] YXYX,
                                 grad[ni*L+l,nj])
                 gprox += prox[l*N+nj] ** 2
 
-        # generate slice fitted values
-        # TODO can we not do with matrix dgemm?
-        for nj in range(N):
-            _dgemv("n", NML, L, -1., &YXYX[0, ni*L], NML,
-                   &B[ni*L,nj], 1, 1., &grad[0,nj], 1)
-#        _dgemm("n", "n", NML, N, L, -1., &YXYX[0, ni*L], NML,
-#               &B[ni*L,0], L, 1., &grad[0,0], NML)
-#        for lj in range(L):
-#            for nq in range(N + M):
-#                for l in range(L):
-#                    for nj in range(N):
-#                        grad[nq*L+l,nj] = (grad[nq*L+l,nj] -
-#                                           YXYX[nq*L+l,ni*L+lj] *
-#                                           B[ni*L+lj,nj])
-
         # build group penalty
         gprox = (1. - (regconst[ni] / sqrt(gprox)))
         gprox = max(0, gprox)
 
-        for l in range(L):
-            # TODO replace with lapack routine
-            for nj in range(N):
+
+        for nj in range(N):
+
+            # NOTE these are old versions of updating
+            # current inner loops are faster and more accurate
+
+#            # TODO replace with lapack routine
+#            # remove current values from gradient
+#            _dgemv("n", NML, L, -1., &YXYX[0, ni*L], NML,
+#                   &B[ni*L,nj], 1, 1., &grad[0,nj], 1)
+
+            # update each coefficient
+            for l in range(L):
+
+                # remove current gradient component
+                for nml in range(NML):
+                    grad[nml,nj] -= YXYX[nml,ni*L+l] * B[ni*L+l,nj]
 
                 B_nml = B[ni*L+l,nj]
                 B[ni*L+l,nj] = prox[l*N+nj] * gprox / stp_size
+                B_dnorm += (B_nml - B[ni*L+l,nj]) ** 2
+                B_norm += (B[ni*L+l,nj]) ** 2
 
-                # update score
-                score_num += (B[ni*L+l,nj] - B_nml) ** 2
-                score_den += B_nml ** 2
+                # readd current gradient component
+                for nml in range(NML):
+                    grad[nml,nj] += YXYX[nml,ni*L+l] * B[ni*L+l,nj]
 
-        # generate slice fitted values
-#        _dgemm("n", "n", NML, N, L, 1., &YXYX[0, ni*L], NML,
-#               &B[ni*L,0], L, 1., &grad[0,0], NML)
-        for nj in range(N):
-            _dgemv("n", NML, L, 1., &YXYX[0, ni*L], NML,
-                   &B[ni*L,nj], 1, 1., &grad[0,nj], 1)
-#        for lj in range(L):
-#            for nq in range(N + M):
-#                for l in range(L):
-#                    for nj in range(N):
-#                        grad[nq*L+l,nj] = (grad[nq*L+l,nj] +
-#                                           YXYX[nq*L+l,ni*L+lj] *
-#                                           B[ni*L+lj,nj])
+#            # readd gradient
+#            _dgemv("n", NML, L, 1., &YXYX[0, ni*L], NML,
+#                   &B[ni*L,nj], 1, 1., &grad[0,nj], 1)
 
-    # iterate over endog vars
+    # iterate over exog vars (RHS)
     for m in range(M):
 
         gprox = 0
@@ -162,58 +157,45 @@ cdef double glasso_iter(double[::1,:] B, double[::1,:] YXYX,
                                 grad[N*L+m*L+l,nj])
                 gprox += prox[l*N+nj] ** 2
 
-        # generate slice fitted values
-        for nj in range(N):
-            _dgemv("n", NML, L, -1., &YXYX[0, N*L+m*L], NML,
-                   &B[N*L+m*L,nj], 1, 1., &grad[0,nj], 1)
-#        _dgemm("n", "n", NML, N, L, -1., &YXYX[0, N*L+m*L], NML,
-#               &B[N*L+m*L,0], L, 1., &grad[0,0], NML)
-#        for lj in range(L):
-#            for nq in range(N + M):
-#                for l in range(L):
-#                    for nj in range(N):
-#                        grad[nq*L+l,nj] = (grad[nq*L+l,nj] -
-#                                           YXYX[nq*L+l,N*L+m*L+lj] *
-#                                           B[N*L+m*L+lj,nj])
-
         # build group penalty
         gprox = (1. - (regconst[N+m] / sqrt(gprox)))
         gprox = max(0, gprox)
 
-        for l in range(L):
-            for nj in range(N):
+        for nj in range(N):
+
+#            # remove current values from gradient
+#            _dgemv("n", NML, L, -1., &YXYX[0, N*L+m*L], NML,
+#                   &B[N*L+m*L,nj], 1, 1., &grad[0,nj], 1)
+
+            # update each coefficient
+            for l in range(L):
+
+                # remove current gradient component
+                for nml in range(NML):
+                    grad[nml,nj] -= YXYX[nml,N*L+m*L+l] * B[N*L+m*L+l,nj]
 
                 B_nml = B[N*L+m*L+l,nj]
                 B[N*L+m*L+l,nj] = prox[l*N+nj] * gprox / stp_size
+                B_dnorm += (B_nml - B[N*L+m*L+l,nj]) ** 2
+                B_norm += (B[N*L+m*L+l,nj]) ** 2
 
-                # update score
-                score_num += (B[N*L+m*L+l,nj] - B_nml) ** 2
-                score_den += B_nml ** 2
+                # readd current gradient component
+                for nml in range(NML):
+                    grad[nml,nj] += YXYX[nml,N*L+m*L+l] * B[N*L+m*L+l,nj]
 
-        # generate slice fitted values
-        for nj in range(N):
-            _dgemv("n", NML, L, 1., &YXYX[0, N*L+m*L], NML,
-                   &B[N*L+m*L,nj], 1, 1., &grad[0,nj], 1)
-#        _dgemm("n", "n", NML, N, L, 1., &YXYX[0, N*L+m*L], NML,
-#               &B[N*L+m*L,0], L, 1., &grad[0,0], NML)
-#        for lj in range(L):
-#            for nq in range(N + M):
-#                for l in range(L):
-#                    for nj in range(N):
-#                        grad[nq*L+l,nj] = (grad[nq*L+l,nj] +
-#                                           YXYX[nq*L+l,N*L+m*L+lj] *
-#                                           B[N*L+m*L+lj,nj])
+#            # readd gradient
+#            _dgemv("n", NML, L, 1., &YXYX[0, N*L+m*L], NML,
+#                   &B[N*L+m*L,nj], 1, 1., &grad[0,nj], 1)
 
-    return score_num / score_den
+    return sqrt(B_dnorm) / sqrt(B_norm)
 
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 @cython.cdivision(True)
-def glasso(double[::1,:] B, double[::1,:] YXYX, double[::1,:] grad,
-           double stp_size, double[::1] regconst,
-           int N, int M, int L, int gliter, double gltol,
-           double tbeta=0.98):
+def glassoVAR(double[::1,:] B, double[::1,:] YXYX, double[::1,:] grad,
+              double stp_size, double[::1] regconst,
+              int N, int M, int L, int gliter, double gltol):
     """Cython glasso implementation
 
     B : ((N + M) * L) x N
@@ -222,7 +204,7 @@ def glasso(double[::1,:] B, double[::1,:] YXYX, double[::1,:] grad,
 
     grad : ((N + M) * L) x N
 
-    stp_size : (N + M) * L
+    stp_size : scalar
 
     regconst : (N + M)
     """
@@ -249,9 +231,6 @@ def glasso(double[::1,:] B, double[::1,:] YXYX, double[::1,:] grad,
                                 regconst, N, M, L, NL, NML)
 
             printf("iter: %d score: %f\n", i, score)
-
-#            # backtracking line search update
-#            stp_size = stp_size * tbeta
 
             # return based on score
             if score < gltol:
