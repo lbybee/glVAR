@@ -1,13 +1,16 @@
 from sklearn.base import BaseEstimator
 from scipy.linalg.lapack import dsysv
 from joblib import Parallel, delayed
+from statsmodels.tsa.vector_ar.util import varsim
 from statsmodels.tsa.api import VAR
+import matplotlib.pyplot as plt
 from proxcdVAR import glassoVAR
 from datetime import datetime
-import matplotlib.pyplot as plt
 import scipy.linalg as sla
 import pandas as pd
 import numpy as np
+import copy
+import os
 
 
 
@@ -44,17 +47,13 @@ class glVAR(BaseEstimator):
         Additional dimensionality attributes
     """
 
-    def __init__(self, endog, exog=None, lags=1):
+    def __init__(self, endog, exog=None, lags=1, std=True):
 
-        # we need to standardize the data for selection but maintain
-        # nstd for the IRF analaysis
-        endog_nstd = endog.copy()
-        endog = (endog - endog.mean()) / endog.std()
-        if exog is not None:
-            exog_nstd = exog.copy()
+        # group lasso fits need to be std, provide this option
+        if std:
+            endog = (endog - endog.mean()) / endog.std()
+        if exog is not None and std:
             exog = (exog - exog.mean()) / exog.std()
-        else:
-            exog_nstd = None
 
         # shape
         T, N = endog.shape
@@ -95,8 +94,6 @@ class glVAR(BaseEstimator):
         self.endog = endog
         self.exog = exog
         self.YX_df = YX_df
-        self.endog_nstd = endog_nstd
-        self.exog_nstd = exog_nstd
         self.YXYX = YXYX
         self.YXYc = YXYc
         self.stp_size = stp_size
@@ -218,44 +215,12 @@ class glVAR(BaseEstimator):
         return self
 
 
-    def fit_IRF(self, B_gl, irf_horizon=12):
+    def fit_IRF(self, B_gl, col_order=None, irf_horizon=12):
         """Given a selection indicator from the group-lasso form IRF"""
 
         # extract relevant values
-        endog = self.endog_nstd
-        exog = self.exog_nstd
-        YX_df = self.YX_df_nstd
-        lags = self.lags
-
-        # constrain to non-zero RHS
-        YX_df_nz = YX_df.iloc[:,B_gl.sum(axis=1) != 0]
-        cols = [c for c in YX_df_nz.columns]
-        nexog = exog[[c for c in exog.columns if ("%s_l1" % c) in cols]]
-        fendog = pd.concat([endog, nexog], axis=1).dropna()
-        fendog = pd.concat([exog[["71"]],
-                            endog[["lsp_ld", "ffr", "lemp", "lgdp"]]],
-                            axis=1).dropna()
-
-        # TODO should be able to implement from scratch
-        # this introduces overhead but is easier
-        mod = VAR(fendog)
-        fit = mod.fit(lags)
-        irf = fit.irf(irf_horizon)
-        irf.plot()
-        plt.savefig("test.png")
-        irf = irf.irfs
-
-        return irf
-
-
-    def fit_IRF_CI(self, B_gl, regconst, irf_horizon=12,
-                   bsiter=500, n_jobs=1, regconst_arr=None,
-                   endog_pen=True, **glkwds):
-        """fit bootstrap IRFs to form confidence intervals"""
-
-        # extract relevant values
-        endog = self.endog_nstd
-        exog = self.exog_nstd
+        endog = self.endog
+        exog = self.exog
         YX_df = self.YX_df
         lags = self.lags
 
@@ -264,80 +229,150 @@ class glVAR(BaseEstimator):
         cols = [c for c in YX_df_nz.columns]
         nexog = exog[[c for c in exog.columns if ("%s_l1" % c) in cols]]
         fendog = pd.concat([endog, nexog], axis=1).dropna()
+        if col_order is not None:
+            fendog = fendog[col_order]
+
+        # TODO should be able to implement from scratch
+        # this introduces overhead but is easier
+        mod = VAR(fendog)
+        fit = mod.fit(lags)
+#        irf = fit.orth_ma_rep(maxn=irf_horizon)
+        irf = fit.irf(irf_horizon).irfs
+
+        return irf
+
+
+    def fit_IRF_CI(self, B_gl, regconst, irf_horizon=12,
+                   bsiter=500, n_jobs=1, regconst_arr=None,
+                   endog_pen=True, col_order=None,
+                   burn=100, **glkwds):
+        """fit bootstrap IRFs to form confidence intervals"""
+
+        # extract relevant values
+        endog = self.endog
+        exog = self.exog
+        YX_df = self.YX_df
+        lags = self.lags
+
+        # constrain to non-zero RHS
+        YX_df_nz = YX_df.iloc[:,B_gl.sum(axis=1) != 0]
+        cols = [c for c in YX_df_nz.columns]
+        nexog = exog[[c for c in exog.columns if ("%s_l1" % c) in cols]]
+        fendog = pd.concat([endog, nexog], axis=1).dropna()
+        if col_order is not None:
+            fendog = fendog[col_order]
+        for c in fendog.columns:
+            plt.hist(fendog[c], bins=30)
+            plt.savefig(os.path.join("real_%s.png" % c))
+            plt.clf()
 
         # fit main active set VAR
         mod = VAR(fendog)
         fit = mod.fit(lags)
-        resid = fit.resid
-        pred = fendog - resid
-        resid = resid[[c for c in resid.columns if c in endog.columns]]
-        pred = pred[[c for c in pred.columns if c in endog.columns]]
-        rcov = np.cov(resid.T)
+        for c in fendog.columns:
+            plt.hist(fendog[c] - fit.resid[c], bins=30)
+            plt.savefig(os.path.join("resid_%s.png" % c))
+            plt.clf()
+        irf = fit.irf(irf_horizon).orth_irfs
 
         # using bootstrap refit group-lasso procedure
-        irf_l = Parallel(n_jobs=n_jobs)(
-                    delayed(self.fit_IRF_part)(pred, rcov, endog, exog,
+        n_jobs = 1
+        res_l = Parallel(n_jobs=n_jobs)(
+                    delayed(self.fit_IRF_part)(fit, endog, exog,
                                                lags, regconst,
                                                regconst_arr, endog_pen,
-                                               irf_horizon, **glkwds)
+                                               irf_horizon, col_order,
+                                               burn, B_gl, **glkwds)
                     for i in range(bsiter))
+        irf_l, coef_l, int_l = zip(*res_l)
 
-        return irf_l
+        return (np.array(irf_l), np.array(coef_l), np.array(int_l),
+                irf, fit.coefs, fit.intercept)
 
 
-    def fit_IRF_part(self, pred, rcov, endog, exog, lags, regconst,
-                     regconst_arr, endog_pen, irf_horizon, **glkwds):
+    def fit_IRF_part(self, fit, endog, exog, lags, regconst,
+                     regconst_arr, endog_pen, irf_horizon, col_order,
+                     burn, B_gl, **glkwds):
         """fit IRF for boostrapped errors"""
 
         # resample noise
+#        sim = varsim(coefs=fit.coefs,
+#                     intercept=fit.intercept,
+#                     sig_u=fit.sigma_u,
+#                     steps=fit.nobs + fit.k_ar + burn)
+#        sim = pd.DataFrame(sim[burn:],
+#                           columns=fit.fittedvalues.columns,
+#                           index=endog.index)
+        pred = fit.fittedvalues
+        resid = fit.resid
         shp = pred.shape
+        chol = np.linalg.cholesky(fit.sigma_u)
+#        noise = resid.copy()
+#        for c in noise.columns:
+#            noise[c] = noise[c].sample(frac=1)
         noise = np.random.multivariate_normal(mean=np.zeros(shp[1]),
-                                              cov=rcov, size=shp[0])
+                                              cov=fit.sigma_u, size=shp[0])
         noise = pd.DataFrame(noise, index=pred.index, columns=pred.columns)
-        endog = pred + noise
-        endog = endog.dropna()
-        exog_f = exog[exog.index.isin(endog.index)]
+        sim = pred + noise
+        for c in noise.columns:
+            plt.hist(noise[c], bins=30)
+            plt.savefig(os.path.join("noise_%s.png" % c))
+            plt.clf()
+        for c in sim.columns:
+            plt.hist(sim[c], bins=30)
+            plt.savefig(os.path.join("sim_%s.png" % c))
+            plt.clf()
+        raise ValueError("stop")
+        asetvars = list(sim.columns)
+        end_cols = [c for c in sim.columns if c in endog.columns]
+        ex_cols = [c for c in sim.columns if c in exog.columns]
+
+        # build new endog/exog
+        endog_f = endog.copy()
+        endog_f[end_cols] = sim[end_cols]
+        endog_f = endog_f.dropna()
+        exog_f = exog.copy()
+        exog_f[ex_cols] = sim[ex_cols]
+        exog_f = exog_f.dropna()
 
         # form lags
-        endog_nstd = endog.copy()
-        endog = (endog - endog.mean()) / endog.std()
-        exog_nstd = exog_f.copy()
-        exog = (exog_f - exog_f.mean()) / exog_f.std()
+        endog_std = (endog_f - endog_f.mean()) / endog_f.std()
+        exog_std = (exog_f - exog_f.mean()) / exog_f.std()
 
         # shape
-        T, N = endog.shape
-        if exog is not None:
-            T, M = exog.shape
+        T, N = endog_std.shape
+        if exog_std is not None:
+            T, M = exog_std.shape
         else:
             M = 0
         P = (N + M) * lags
 
         # form lag
-        cols = list(endog.columns)
+        cols = list(endog_std.columns)
         data_l = []
         for c in cols:
             for l in range(1, lags+1):
-                df = endog[c].shift(l)
+                df = endog_std[c].shift(l)
                 df.name = "%s_l%d" % (c, l)
                 data_l.append(df)
-        if exog is not None:
-            cols = list(exog.columns)
+        if exog_std is not None:
+            cols = list(exog_std.columns)
             for c in cols:
                 for l in range(1, lags+1):
-                    df = exog[c].shift(l)
+                    df = exog_std[c].shift(l)
                     df.name = "%s_l%d" % (c, l)
                     data_l.append(df)
         YX_df = pd.concat(data_l, axis=1).iloc[lags:,:]
-        endog = endog.iloc[lags:,:]
+        endog_std = endog_std.iloc[lags:,:]
 
         # form values and vectorized endog
         YX = YX_df.values
-        Yc = endog.values
+        Yc = endog_std.values
 
         # form YY, XX, vYvY, XvY
         YXYX = np.array(YX.T.dot(YX), order="F")
         YXYc = np.array(YX.T.dot(Yc), order="F")
-        stp_size = np.linalg.eigvalsh(YXYX)[-1] / (T * N * lags) * (1 + 1e-6)
+        stp_size = np.linalg.eigvalsh(YXYX)[-1] / T * (1 + 1e-6)
 
         # handle endog penalty
         if regconst_arr is None and endog_pen is False:
@@ -345,24 +380,47 @@ class glVAR(BaseEstimator):
 
         # initialize B starting value
         B = np.zeros(shape=((N + M) * lags, N), order="F")
-        for i, c in enumerate(endog.columns):
-            coef = sla.lstsq(YX_df.values, endog[c].values)[0]
+        for i, c in enumerate(endog_std.columns):
+            coef = sla.lstsq(YX_df.values, endog_std[c].values)[0]
             B[:,i] = coef
 
-        # fit glasso
-        B_gl = _fitgl(regconst, B, YXYX, YXYc, stp_size, T, P, N, M, lags,
-                      regconst_arr, **glkwds)
+#        # fit glasso
+#        B_gl = _fitgl(regconst, B, YXYX, YXYc, stp_size, T, P, N, M, lags,
+#                      regconst_arr, **glkwds)
 
-        # fit active set VAR and form IRFs
+        # prep active set data
         YX_df_nz = YX_df.iloc[:,B_gl.sum(axis=1) != 0]
         cols = [c for c in YX_df_nz.columns]
-        nexog = exog[[c for c in exog.columns if ("%s_l1" % c) in cols]]
-        fendog = pd.concat([endog, nexog], axis=1).dropna()
+        nexog = exog_f[[c for c in exog_f.columns if ("%s_l1" % c) in cols]]
+        fendog = pd.concat([endog_f, nexog], axis=1).dropna()
+#        if col_order is not None:
+#            ncols = [c for c in fendog.columns if c not in col_order]
+#            col_ordern = [c for c in col_order if c in fendog.columns]
+#            fendog = fendog[col_ordern + ncols]
+        fendog = fendog[col_order]
+
+        # get map from new endog labels to old
+        find = pd.Series(fendog.columns, name="label")
+        find.index.name = "ind"
+        find = find.reset_index().set_index("label")["ind"]
+        oind = pd.Series(asetvars, name="label")
+        oind.index.name = "oind"
+        oind = oind.reset_index()
+        oind["nind"] = oind["label"].map(find)
+        oind = oind[["oind", "nind"]].dropna()
+        nind = oind["nind"].astype(int).values
+        oind = oind["oind"].astype(int).values
+
+        # fit active set VAR and form IRFs
         mod = VAR(fendog)
         fit = mod.fit(lags)
-        irf = fit.irf(irf_horizon).irfs
+#        irf = fit.irf(irf_horizon).orth_irfs
+        irf = fit.irf(irf_horizon, var_decomp=chol).orth_irfs
+        irft = np.zeros((irf.shape[0], len(asetvars), len(asetvars)))
+        for oi, ni in zip(oind, nind):
+            irft[:,oi,oind] = irf[:,ni,nind]
 
-        return irf
+        return irft, fit.coefs, fit.intercept
 
 
 def _fitirf(rcov, B_as, irf_horizon, lags):
