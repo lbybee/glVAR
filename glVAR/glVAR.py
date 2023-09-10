@@ -261,22 +261,11 @@ class glVAR(BaseEstimator):
         fendog = pd.concat([endog, nexog], axis=1).dropna()
         if col_order is not None:
             fendog = fendog[col_order]
-        for c in fendog.columns:
-            plt.hist(fendog[c], bins=30)
-            plt.savefig(os.path.join("real_%s.png" % c))
-            plt.clf()
-
-        # fit main active set VAR
         mod = VAR(fendog)
         fit = mod.fit(lags)
-        for c in fendog.columns:
-            plt.hist(fendog[c] - fit.resid[c], bins=30)
-            plt.savefig(os.path.join("resid_%s.png" % c))
-            plt.clf()
         irf = fit.irf(irf_horizon).orth_irfs
 
         # using bootstrap refit group-lasso procedure
-        n_jobs = 1
         res_l = Parallel(n_jobs=n_jobs)(
                     delayed(self.fit_IRF_part)(fit, endog, exog,
                                                lags, regconst,
@@ -305,24 +294,16 @@ class glVAR(BaseEstimator):
 #                           index=endog.index)
         pred = fit.fittedvalues
         resid = fit.resid
+        chol = np.linalg.cholesky(resid.cov())
         shp = pred.shape
-        chol = np.linalg.cholesky(fit.sigma_u)
 #        noise = resid.copy()
 #        for c in noise.columns:
 #            noise[c] = noise[c].sample(frac=1)
         noise = np.random.multivariate_normal(mean=np.zeros(shp[1]),
-                                              cov=fit.sigma_u, size=shp[0])
+                                              cov=resid.cov(), size=shp[0])
         noise = pd.DataFrame(noise, index=pred.index, columns=pred.columns)
-        sim = pred + noise
-        for c in noise.columns:
-            plt.hist(noise[c], bins=30)
-            plt.savefig(os.path.join("noise_%s.png" % c))
-            plt.clf()
-        for c in sim.columns:
-            plt.hist(sim[c], bins=30)
-            plt.savefig(os.path.join("sim_%s.png" % c))
-            plt.clf()
-        raise ValueError("stop")
+#        sim = pred + noise
+        sim = pred + resid
         asetvars = list(sim.columns)
         end_cols = [c for c in sim.columns if c in endog.columns]
         ex_cols = [c for c in sim.columns if c in exog.columns]
@@ -384,20 +365,19 @@ class glVAR(BaseEstimator):
             coef = sla.lstsq(YX_df.values, endog_std[c].values)[0]
             B[:,i] = coef
 
-#        # fit glasso
-#        B_gl = _fitgl(regconst, B, YXYX, YXYc, stp_size, T, P, N, M, lags,
-#                      regconst_arr, **glkwds)
+        # fit glasso
+        B_gl = _fitgl(regconst, B, YXYX, YXYc, stp_size, T, P, N, M, lags,
+                      regconst_arr, **glkwds)
 
         # prep active set data
         YX_df_nz = YX_df.iloc[:,B_gl.sum(axis=1) != 0]
         cols = [c for c in YX_df_nz.columns]
         nexog = exog_f[[c for c in exog_f.columns if ("%s_l1" % c) in cols]]
         fendog = pd.concat([endog_f, nexog], axis=1).dropna()
-#        if col_order is not None:
-#            ncols = [c for c in fendog.columns if c not in col_order]
-#            col_ordern = [c for c in col_order if c in fendog.columns]
-#            fendog = fendog[col_ordern + ncols]
-        fendog = fendog[col_order]
+        if col_order is not None:
+            ncols = [c for c in fendog.columns if c not in col_order]
+            col_ordern = [c for c in col_order if c in fendog.columns]
+            fendog = fendog[col_ordern + ncols]
 
         # get map from new endog labels to old
         find = pd.Series(fendog.columns, name="label")
@@ -412,10 +392,11 @@ class glVAR(BaseEstimator):
         oind = oind["oind"].astype(int).values
 
         # fit active set VAR and form IRFs
+        print(fendog.columns)
         mod = VAR(fendog)
         fit = mod.fit(lags)
-#        irf = fit.irf(irf_horizon).orth_irfs
-        irf = fit.irf(irf_horizon, var_decomp=chol).orth_irfs
+        irf = fit.irf(irf_horizon).orth_irfs
+#        irf = fit.irf(irf_horizon, var_decomp=chol).orth_irfs
         irft = np.zeros((irf.shape[0], len(asetvars), len(asetvars)))
         for oi, ni in zip(oind, nind):
             irft[:,oi,oind] = irf[:,ni,nind]
